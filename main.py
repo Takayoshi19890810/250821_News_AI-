@@ -1,21 +1,23 @@
 import os
 import sys
 import json
-import re
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from dateutil import parser as duparser
 
 import gspread
-from gspread.utils import rowcol_to_a1
 
-# ─────────────────────────────────────────
-# 追加: Gemini（任意・APIキーがあれば実行）
+# 追加: 高精度なUnicode正規表現
+try:
+    import regex as re_u  # pip install regex
+except Exception:
+    re_u = None
+
+# 追加: Gemini（任意）
 try:
     import google.generativeai as genai
 except Exception:
     genai = None
-# ─────────────────────────────────────────
 
 # ====== 設定 ======
 INPUT_SPREADSHEET_ID = os.getenv(
@@ -54,8 +56,8 @@ def calc_time_window(now_jst: datetime):
 def parse_sheet_datetime_to_jst(val):
     """
     C列「投稿日」を JST の datetime に変換。
-    - 数値（シリアル）の場合：1899-12-30 起点→JSTに
-    - 文字列の場合：dateutilで柔軟パース（TZ無ければJST想定）
+    - 数値（シリアル）：1899-12-30 起点→JST
+    - 文字列：dateutilで柔軟パース（TZ無→JST想定）
     """
     if val is None or str(val).strip() == "":
         return None
@@ -83,21 +85,27 @@ def parse_sheet_datetime_to_jst(val):
 
 def format_compact_jst(dt: datetime) -> str:
     """
-    ① 投稿日の書式を `25/8/20 15:01` のようにする（年は下2桁、月日をゼロ埋めしない）
+    ① 投稿日の書式を `25/8/20 15:01` に統一（年=下2桁、月日=ゼロ埋め無し）
     """
     return f"{dt:%y}/{dt.month}/{dt.day} {dt:%H:%M}"
 
 
 def normalize_title_for_dup(s: str) -> str:
     """
-    ② 重複確認用にH列へ転記する正規化タイトル:
-       記号（() [] 【】 <> "" 『』 「」 ！! ？? ; : 、。 … ー など）と全角/半角スペースを削除
+    ② 重複確認用H列:
+       句読点・記号・空白・制御文字を包括的に削除。
+       例: “ ” 『 』 〈 〉 【 】 <> () [] ／ ／ : ; ? ! ・ — ー なども除去。
     """
     if not s:
         return ""
-    # 記号とスペース（全角/半角）を除去
-    pattern = r'[\s\(\)\[\]【】＜＞<>「」『』"\'！!？\?;:、。…・ー—–\-｜|＋+＊*／/\\.,]+'
-    return re.sub(pattern, "", s)
+    if re_u:
+        # \p{P}=句読点, \p{S}=記号（通貨/数学/その他）, \p{Z}=区切り（スペース等）, \p{Cc}=制御文字
+        return re_u.sub(r'[\p{P}\p{S}\p{Z}\p{Cc}]+', '', s)
+    else:
+        # フォールバック（標準re版：主要な記号と空白を網羅）
+        import re
+        pattern = r'[\s\(\)\[\]【】＜＞<>「」『』"\'！!？\?;:、。…・ー—–\-｜|＋+＊*／/\\.,]+'
+        return re.sub(pattern, "", s)
 
 
 def service_account_client_from_env():
@@ -135,7 +143,7 @@ def ensure_output_worksheet(sh_out, title: str):
     try:
         ws = sh_out.worksheet(title)
     except gspread.WorksheetNotFound:
-        ws = sh_out.add_worksheet(title=title, rows=1000, cols=len(OUTPUT_HEADERS))
+        ws = sh_out.add_worksheet(title=title, rows=2000, cols=len(OUTPUT_HEADERS))
         ws.append_row(OUTPUT_HEADERS, value_input_option="USER_ENTERED")
     return ws
 
@@ -191,8 +199,8 @@ def collect_rows_from_input(sh_in, start_jst: datetime, end_jst: datetime):
                 continue
 
             if start_jst <= posted_dt <= end_jst:
-                posted_fmt = format_compact_jst(posted_dt)  # ①ここで整形
-                norm_title = normalize_title_for_dup(title)  # ②H列用
+                posted_fmt = format_compact_jst(posted_dt)    # ①
+                norm_title = normalize_title_for_dup(title)   # ②
                 out_rows.append([sheet_name, title, url, posted_fmt, source_name, "", "", norm_title])
 
     return out_rows
@@ -211,11 +219,30 @@ def append_rows_dedup(ws_out, rows, existing_urls):
     return len(new_rows)
 
 
+def refresh_h_column_all(ws_out):
+    """
+    H列（重複確認用タイトル）を**全行**再計算して上書き。
+    記号の取りこぼしを防ぐため、毎回最新の正規化ルールで更新します。
+    """
+    values = ws_out.get_all_values()
+    if len(values) <= 1:
+        return
+    updates = []
+    for i, row in enumerate(values):
+        if i == 0:
+            continue
+        row_idx = i + 1
+        title = row[1] if len(row) > 1 else ""
+        norm = normalize_title_for_dup(title)
+        updates.append({"range": f"H{row_idx}", "values": [[norm]]})
+    if updates:
+        ws_out.batch_update(updates, value_input_option="USER_ENTERED")
+
+
 def classify_with_gemini(ws_out):
     """
-    ③ B列タイトルをもとに、F列（ポジネガ）/ G列（カテゴリ）をGeminiで分類。
-       - 既にF/Gが埋まっている行はスキップ
-       - H列（正規化タイトル）は空なら埋める
+    B列タイトルをもとに、F列（ポジネガ）/ G列（カテゴリ）をGeminiで分類。
+    既にF/Gが埋まっている行はスキップ。
     """
     api_key = os.getenv("GEMINI_API_KEY", "").strip()
     if not api_key or genai is None:
@@ -223,14 +250,11 @@ def classify_with_gemini(ws_out):
         return
 
     genai.configure(api_key=api_key)
-
     values = ws_out.get_all_values()
     if len(values) <= 1:
         return
 
-    # 収集: 分類対象（F/Gが未記入）
     items = []  # (row_idx, title)
-    h_updates = []  # {'range': 'Hn', 'values': [[norm]]}
     for i, row in enumerate(values):
         if i == 0:
             continue
@@ -238,33 +262,14 @@ def classify_with_gemini(ws_out):
         title = row[1] if len(row) > 1 else ""
         f_val = row[5] if len(row) > 5 else ""
         g_val = row[6] if len(row) > 6 else ""
-        h_val = row[7] if len(row) > 7 else ""
-
-        if title:
-            # H列が空なら埋める
-            if not h_val:
-                norm = normalize_title_for_dup(title)
-                h_updates.append({"range": f"H{row_idx}", "values": [[norm]]})
-            # F/Gが空なら分類対象
-            if not f_val or not g_val:
-                items.append((row_idx, title))
-
-    # 先にH列の欠損をまとめて更新
-    if h_updates:
-        ws_out.batch_update(h_updates, value_input_option="USER_ENTERED")
+        if title and (not f_val or not g_val):
+            items.append((row_idx, title))
 
     if not items:
         print("ℹ 分類対象の行はありません。")
         return
 
-    # バッチ分割（長文防止）
-    BATCH = 40
-    updates = []
-    for start in range(0, len(items), BATCH):
-        batch = items[start : start + BATCH]
-        payload = [{"row": r, "title": t} for (r, t) in batch]
-
-        system_prompt = """
+    system_prompt = """
 あなたは敏腕雑誌記者です。次のタイトル一覧を以下の視点で分類してください。
 ①ポジティブ、ネガティブ、ニュートラルの判別（「ポジティブ」「ネガティブ」「ニュートラル」のいずれか）。
 ②記事のカテゴリーの判別（最も関連が高い1つだけ）：
@@ -285,14 +290,18 @@ def classify_with_gemini(ws_out):
 入力のタイトル文字列は一切変更しないでください。
 """.strip()
 
-        # モデル呼び出し
+    BATCH = 40
+    updates = []
+    for start in range(0, len(items), BATCH):
+        batch = items[start : start + BATCH]
+        payload = [{"row": r, "title": t} for (r, t) in batch]
         try:
             model = genai.GenerativeModel("gemini-1.5-flash")
             prompt = system_prompt + "\n\n" + json.dumps(payload, ensure_ascii=False, indent=2)
             resp = model.generate_content(prompt)
-            text = resp.text or ""
-            # JSON抽出（コードブロック対応）
-            m = re.search(r"\[.*\]", text, flags=re.DOTALL)
+            text = (resp.text or "").strip()
+            import re as re_std
+            m = re_std.search(r"\[.*\]", text, flags=re_std.DOTALL)
             json_text = m.group(0) if m else text
             result = json.loads(json_text)
 
@@ -341,7 +350,10 @@ def main():
     # 追記（重複除外）
     added = append_rows_dedup(ws_out, extracted, existing)
 
-    # ③ Gemini分類 & ② H列の欠損補完を実施
+    # H列を毎回**全行**再計算（記号取りこぼし対策）
+    refresh_h_column_all(ws_out)
+
+    # Gemini分類
     classify_with_gemini(ws_out)
 
     print("✅ 完了")
