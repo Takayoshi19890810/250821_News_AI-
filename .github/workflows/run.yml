@@ -2,8 +2,8 @@ name: Transfer Selected News
 
 on:
   schedule:
-    # 毎日 15:05 JST（= 06:05 UTC）
-    - cron: "5 6 * * *"
+    # 毎日 15:00 JST（= 06:00 UTC）
+    - cron: "0 6 * * *"
   workflow_dispatch:
 
 jobs:
@@ -14,7 +14,7 @@ jobs:
       INPUT_SPREADSHEET_ID: 1RglATeTbLU1SqlfXnNToJqhXLdNoHCdePldioKDQgU8
       OUTPUT_SPREADSHEET_ID: 1bi9U5y5k0EqF4lTgISSPvh8H_2dc8PUA2U3W0gulRbM
       GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
-      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}  # ← 追加（任意）
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}  # 任意
 
     steps:
       - name: 📦 Checkout
