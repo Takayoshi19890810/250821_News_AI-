@@ -1,0 +1,35 @@
+name: Transfer Selected News
+
+on:
+  schedule:
+    # 毎日 15:05 JST（= 06:05 UTC）に実行
+    - cron: "5 6 * * *"
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    env:
+      TZ: Asia/Tokyo
+      INPUT_SPREADSHEET_ID: 1RglATeTbLU1SqlfXnNToJqhXLdNoHCdePldioKDQgU8
+      OUTPUT_SPREADSHEET_ID: 1bi9U5y5k0EqF4lTgISSPvh8H_2dc8PUA2U3W0gulRbM
+      # GOOGLE_CREDENTIALS は GitHub Secrets に JSON 文字列で格納してください
+      GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
+
+    steps:
+      - name: 📦 Checkout
+        uses: actions/checkout@v4
+
+      - name: 🐍 Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 📦 Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: ▶ Run script
+        run: |
+          python main.py
