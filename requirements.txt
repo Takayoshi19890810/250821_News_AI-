@@ -1,4 +1,7 @@
+# requirements.txt  —  追加要件対応版
 gspread==5.12.0
 google-auth==2.35.0
 python-dateutil==2.9.0.post0
 google-generativeai==0.7.2
+regex==2024.11.6
+jaconv==0.3.4
