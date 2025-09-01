@@ -1,4 +1,4 @@
-# main.py  —  追加要件対応版
+# main.py  — 指定プロンプト・F/G列反映版
 import os
 import sys
 import json
@@ -29,21 +29,23 @@ except Exception:
 
 
 # ====== 設定 ======
+# 入力側（ニュース収集結果が入るスプレッドシート）
 INPUT_SPREADSHEET_ID = os.getenv(
     "INPUT_SPREADSHEET_ID",
-    "1RglATeTbLU1SqlfXnNToJqhXLdNoHCdePldioKDQgU8"  # 入力
+    "1RglATeTbLU1SqlfXnNToJqhXLdNoHCdePldioKDQgU8"  # 既定: 日産ニュース集計
 )
+# 出力側（抽出・分類の結果を書き込むスプレッドシート）
 OUTPUT_SPREADSHEET_ID = os.getenv(
     "OUTPUT_SPREADSHEET_ID",
-    "1bi9U5y5k0EqF4lTgISSPvh8H_2dc8PUA2U3W0gulRbM"  # 出力
+    "1bi9U5y5k0EqF4lTgISSPvh8H_2dc8PUA2U3W0gulRbM"  # 既定: ご提示のシート
 )
 INPUT_SHEETS = ["MSN", "Google", "Yahoo"]
 
 # 出力列（A〜I）:
-# A=ソース, B=タイトル, C=URL, D=投稿日, E=引用元, F=ポジネガ, G=カテゴリ, H=重複確認用タイトル, I=有料カテゴリ（新設）
+# A=ソース, B=タイトル, C=URL, D=投稿日, E=引用元, F=ポジネガ, G=カテゴリ, H=重複確認用タイトル, I=有料カテゴリ
 OUTPUT_HEADERS = [
     "ソース", "タイトル", "URL", "投稿日", "引用元",
-    "ポジネガ", "カテゴリ", "重複確認用タイトル", "有料カテゴリ"  # 追加
+    "ポジネガ", "カテゴリ", "重複確認用タイトル", "有料カテゴリ"
 ]
 
 JST = ZoneInfo("Asia/Tokyo")
@@ -119,7 +121,6 @@ def to_hankaku_kana_ascii_digit(s: str) -> str:
     if jaconv is not None:
         # ascii/digit も True にして安全側で全半角混在を解消
         s_nfkc = jaconv.z2h(s_nfkc, kana=True, digit=True, ascii=True)
-    # なお jaconv が無い場合は、カタカナのみ完全には半角化できない
     return s_nfkc
 
 
@@ -139,19 +140,15 @@ def normalize_title_for_dup(s: str) -> str:
     # 2) 記号類の除去
     if re_u:
         # \p{P}=句読点, \p{S}=記号, \p{Z}=区切り（スペース等）, \p{Cc}=制御
-        # ここに長音・各種ハイフン・ダッシュの互換字も包含される
         s = re_u.sub(r'[\p{P}\p{S}\p{Z}\p{Cc}]+', '', s)
     else:
-        # フォールバック：主要な記号と括弧を網羅
         import re
-        dash_chars = r'\-\u2212\u2010\u2011\u2012\u2013\u2014\u2015\uFF0D\u30FC\uFF70'  # - − ‐ - ‒ – — ― － ー ｰ
+        dash_chars = r'\-\u2212\u2010\u2011\u2012\u2013\u2014\u2015\uFF0D\u30FC\uFF70'
         pattern = (
-            r'[\s"'          # 空白, "
-            r"'\u201C\u201D\u2018\u2019"  # “ ” ‘ ’
-            r'\(\)\[\]{}<>]'              # 半角括弧
-            r'|[、。・,…:;!?！？／/\\|＋+＊*.,]'  # 句読点・記号
-            r'|[【】＜＞「」『』《》〔〕［］｛｝（）]'  # 全角括弧
-            r'|[' + dash_chars + r']'      # ハイフン・ダッシュ・長音
+            r'[\s"\'\u201C\u201D\u2018\u2019\(\)\[\]{}<>]'              # 空白と各種引用符・半角括弧
+            r'|[、。・,…:;!?！？／/\\|＋+＊*.,]'                       # 句読点・記号
+            r'|[【】＜＞「」『』《》〔〕［］｛｝（）]'               # 全角括弧
+            r'|[' + dash_chars + r']'                                   # ハイフン・ダッシュ・長音
         )
         s = re.sub(pattern, "", s)
 
@@ -253,14 +250,14 @@ def collect_rows_from_input(sh_in, start_jst: datetime, end_jst: datetime):
                 norm_title = normalize_title_for_dup(title)
                 out_rows.append([
                     sheet_name,         # A: ソース（入力元シート名）
-                    title,              # B: タイトル（元の見出し）
+                    title,              # B: タイトル
                     url,                # C: URL
-                    posted_fmt,         # D: 投稿日（整形）
+                    posted_fmt,         # D: 投稿日
                     source_name,        # E: 引用元
-                    "",                 # F: ポジネガ（後でGemini等）
-                    "",                 # G: カテゴリ（後でGemini等）
-                    norm_title,         # H: 重複確認用タイトル（正規化）
-                    ""                  # I: 有料カテゴリ（新設・空欄）
+                    "",                 # F: ポジネガ（後でAIが埋める）
+                    "",                 # G: カテゴリ（後でAIが埋める）
+                    norm_title,         # H: 重複確認用タイトル
+                    ""                  # I: 有料カテゴリ
                 ])
 
     return out_rows
@@ -329,26 +326,35 @@ def classify_with_gemini(ws_out):
         print("ℹ 分類対象の行はありません。")
         return
 
+    # ====== ここが差し替えたプロンプト ======
     system_prompt = """
-あなたは敏腕雑誌記者です。次のタイトル一覧を以下の視点で分類してください。
-①ポジティブ、ネガティブ、ニュートラルの判別（「ポジティブ」「ネガティブ」「ニュートラル」のいずれか）。
-②記事のカテゴリーの判別（最も関連が高い1つだけ）：
-- 会社：企業の施策や生産、販売台数など。ニッサン、トヨタ、ホンダ、スバル、マツダ、スズキ、ミツビシ、ダイハツは()付で企業名を記載。それ以外はその他。
-- 車：クルマの名称が含まれているもの（会社名だけの場合は車に分類しない）。新型/現行/旧型+名称を()付で記載（例：新型リーフ、現行セレナ、旧型スカイライン）。日産以外は「車（競合）」。
-- 技術（EV）
-- 技術（e-POWER）
-- 技術（e-4ORCE）
-- 技術（AD/ADAS）
-- 技術：上記以外
-- モータースポーツ
-- 株式
-- 政治・経済
-- スポーツ
-- その他
+あなたは敏腕雑誌記者です。Webニュースのタイトルを以下の規則で厳密に分類してください。
 
-出力は必ず **JSON配列**。各要素は { "row": 行番号, "sentiment": "ポジティブ|ネガティブ|ニュートラル", "category": "カテゴリ名"} の形式のみで返してください。
-入力のタイトル文字列は一切変更しないでください。
+【1】ポジネガ判定（必ず次のいずれか一語のみ）：
+- ポジティブ
+- ネガティブ
+- ニュートラル
+
+【2】記事のカテゴリー判定（最も関連が高い1つだけを選んで出力。並記禁止）：
+- 会社：企業の施策や生産、販売台数など。ニッサン、トヨタ、ホンダ、スバル、マツダ、スズキ、ミツビシ、ダイハツの記事の場合は () 付きで企業名を記載。それ以外は「その他」。
+- 車：クルマの名称が含まれているもの（会社名だけの場合は車に分類しない）。新型/現行/旧型 + 名称 を () 付きで記載（例：新型リーフ、現行セレナ、旧型スカイライン）。日産以外の車の場合は「車（競合）」と記載。
+- 技術（EV）：電気自動車の技術に関わるもの（ただしバッテリー工場建設や企業の施策は含まない）。
+- 技術（e-POWER）：e-POWERに関わるもの。
+- 技術（e-4ORCE）：4WDや2WD、AWDに関わるもの。
+- 技術（AD/ADAS）：自動運転や先進運転システムに関わるもの。
+- 技術：上記以外の技術に関わるもの。
+- モータースポーツ：F1やラリー、フォーミュラEなど、自動車レースに関わるもの。
+- 株式：株式発行や株価の値動き、投資に関わるもの。
+- 政治・経済：政治家や選挙、税金、経済に関わるもの。
+- スポーツ：野球やサッカー、バレーボールなど自動車以外のスポーツに関わるもの。
+- その他：上記に含まれないもの。
+
+【出力要件】
+- **JSON配列**のみを返してください（余計な文章や注釈は出力しない）。
+- 各要素は次の形式：{"row": 行番号, "sentiment": "ポジティブ|ネガティブ|ニュートラル", "category": "カテゴリ名"}
+- 入力の「タイトル」文字列は一切変更しないこと（出力には含めなくて良い）。
 """.strip()
+    # =====================================
 
     BATCH = 40
     updates = []
@@ -361,20 +367,34 @@ def classify_with_gemini(ws_out):
             resp = model.generate_content(prompt)
             text = (resp.text or "").strip()
 
+            # JSON抽出（応答に前後文が混ざる保険）
             import re as re_std
             m = re_std.search(r"\[.*\]", text, flags=re_std.DOTALL)
             json_text = m.group(0) if m else text
             result = json.loads(json_text)
 
             for obj in result:
-                row_idx = int(obj.get("row"))
+                try:
+                    row_idx = int(obj.get("row"))
+                except Exception:
+                    continue
                 sentiment = str(obj.get("sentiment", "")).strip()
                 category = str(obj.get("category", "")).strip()
-                if sentiment or category:
-                    updates.append({
-                        "range": f"F{row_idx}:G{row_idx}",
-                        "values": [[sentiment, category]]
-                    })
+
+                # 期待語彙に軽く寄せる（全角・前後空白など）
+                if sentiment not in ("ポジティブ", "ネガティブ", "ニュートラル"):
+                    # 簡易正規化（誤記リカバリ）
+                    if "ポジ" in sentiment:
+                        sentiment = "ポジティブ"
+                    elif "ネガ" in sentiment:
+                        sentiment = "ネガティブ"
+                    else:
+                        sentiment = "ニュートラル"
+
+                updates.append({
+                    "range": f"F{row_idx}:G{row_idx}",   # F=ポジネガ, G=カテゴリ
+                    "values": [[sentiment, category]]
+                })
         except Exception as e:
             print(f"⚠ Gemini応答の解析に失敗: {e}")
 
@@ -414,7 +434,7 @@ def main():
     # H列を毎回**全行**再計算（正規化ルールの最新反映）
     refresh_h_column_all(ws_out)
 
-    # Gemini分類（任意）
+    # Gemini分類（F/G列を埋める）
     classify_with_gemini(ws_out)
 
     print("✅ 完了")
